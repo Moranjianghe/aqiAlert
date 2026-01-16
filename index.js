@@ -37,26 +37,39 @@ async function updateAqiTask() {
         const res = await axios.get(url);
         if (res.data.status !== 'ok') return;
 
-        const aqi = res.data.data.aqi;
-        const time = res.data.data.time.s;
+        const data = res.data.data;
+        const aqi = data.aqi;
+        const time = data.time.s;
+        const city = data.city.name;
+        const cityUrl = data.city.url;
         const level = getAqiLevel(aqi);
+        
+        // 提取主要污染物細節 (如果存在)
+        const pm25 = data.iaqi.pm25 ? data.iaqi.pm25.v : 'N/A';
+        const pm10 = data.iaqi.pm10 ? data.iaqi.pm10.v : 'N/A';
 
-        console.log(`[${new Date().toLocaleString()}] 當前 AQI: ${aqi} (${level.label})`);
+        console.log(`[${new Date().toLocaleString()}] 當前位置: ${city}, AQI: ${aqi} (${level.label})`);
 
         // 1. 邏輯判斷：高於橘色 (AQI > 100) 時，更新 RSS
         if (aqi > 100) {
             try {
                 const feed = new Feed({
-                    title: "AQI 預警",
-                    description: "高於橘色級別的空氣監測",
-                    id: "http://localhost/",
-                    link: "http://localhost/",
+                    title: `AQI 預警 - ${city}`,
+                    description: `來自 ${city} 的即時空氣量監測`,
+                    id: cityUrl,
+                    link: cityUrl,
                     updated: new Date(),
                 });
 
                 feed.addItem({
-                    title: `⚠️ AQI 警告: ${aqi} - ${level.label}`,
-                    description: `更新時間: ${time}，請注意健康防護。`,
+                    title: `⚠️ [${level.label}] AQI 數值達 ${aqi} (${city})`,
+                    description: `監測站位置: ${city}
+當前 AQI: ${aqi}
+健康等級: ${level.label}
+主要數據: PM2.5: ${pm25}, PM10: ${pm10}
+更新時間: ${time}
+請盡量減少戶外活動並佩戴口罩。`,
+                    link: cityUrl,
                     date: new Date(),
                 });
                 currentRssXml = feed.rss2();
@@ -67,8 +80,17 @@ async function updateAqiTask() {
 
         // 2. 邏輯判斷：高於橙色/紅色 (AQI > 150) 時，電報報警
         if (aqi > 150) {
+            const message = `🚨🚨🚨 【緊急空氣預警】\n\n` +
+                          `📍 監測地點：${city}\n` +
+                          `🤒 空氣質量：${level.label} (${level.color}色)\n` +
+                          `📈 AQI 數值：${aqi}\n` +
+                          `🌫️ PM2.5 濃度：${pm25}\n` +
+                          `🌫️ PM10 濃度：${pm10}\n` +
+                          `⏰ 更新時間：${time}\n\n` +
+                          `👉 [點此查看詳細數據與地圖](${cityUrl})`;
+
             if (CONFIG.TG_TOKEN && CONFIG.TG_TOKEN !== 'xxx') {
-                bot.telegram.sendMessage(CONFIG.TG_CHAT_ID, message).catch(tgError => {
+                bot.telegram.sendMessage(CONFIG.TG_CHAT_ID, message, { parse_mode: 'Markdown' }).catch(tgError => {
                     console.error('Telegram 發送失敗 (已跳過):', tgError.message);
                 });
             } else {
