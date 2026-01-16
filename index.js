@@ -12,22 +12,30 @@ const CONFIG = {
     TG_TOKEN: process.env.TG_TOKEN,
     TG_CHAT_ID: process.env.TG_CHAT_ID,
     PORT: process.env.PORT,
-    CHECK_INTERVAL: '*/30 * * * *' // 每 30 分鐘執行
+    CHECK_INTERVAL: '*/30 * * * *', // 每 30 分鐘執行
+    ALERT_THRESHOLD: 150            // 電報報警門檻 (中度污染以上)
 };
 
 const app = express();
 const bot = new Telegraf(CONFIG.TG_TOKEN);
 
-// 全局變量，存放生成的 RSS 文本
+// 全局變量，存放狀態以實現「智慧提醒」
 let currentRssXml = '';
+let lastRssUpdateTime = 0; // 記錄上一次 RSS 更新的時間戳
+// 紀錄每個等級 (1-4) 上一次發送 Telegram 報警的時間戳
+let levelAlertTimestamps = {
+    2: 0, // 輕度
+    3: 0, // 中度
+    4: 0  // 重度
+};
 
-// AQI 等級對應表
+// AQI 等級對應表 (增加 value 用於邏輯判斷)
 const getAqiLevel = (aqi) => {
-    if (aqi <= 50) return { label: '優', color: '綠' };
-    if (aqi <= 100) return { label: '良', color: '黃' };
-    if (aqi <= 150) return { label: '輕度污染', color: '橘' };
-    if (aqi <= 200) return { label: '中度污染', color: '紅/橙' }; // 對應你說的橙色
-    return { label: '重度污染', color: '紫' };
+    if (aqi <= 50) return { value: 0, label: '優', color: '綠' };
+    if (aqi <= 100) return { value: 1, label: '良', color: '黃' };
+    if (aqi <= 150) return { value: 2, label: '輕度污染', color: '橘' };
+    if (aqi <= 200) return { value: 3, label: '中度污染', color: '紅/橙' };
+    return { value: 4, label: '重度污染', color: '紫' };
 };
 
 // 核心任務：獲取數據並處理邏輯
@@ -43,6 +51,7 @@ async function updateAqiTask() {
         const city = data.city.name;
         const cityUrl = data.city.url;
         const level = getAqiLevel(aqi);
+        const now = Date.now();
         
         // 提取主要污染物細節 (如果存在)
         const pm25 = data.iaqi.pm25 ? data.iaqi.pm25.v : 'N/A';
@@ -50,8 +59,9 @@ async function updateAqiTask() {
 
         console.log(`[${new Date().toLocaleString()}] 當前位置: ${city}, AQI: ${aqi} (${level.label})`);
 
-        // 1. 邏輯判斷：高於橘色 (AQI > 100) 時，更新 RSS
-        if (aqi > 100) {
+        // 1. 邏輯判斷：高於橘色 (AQI > 100) 時，每 60 分鐘更新一次 RSS
+        const isRssDue = (now - lastRssUpdateTime) >= 60 * 60 * 1000; // 60 分鐘
+        if (aqi > 100 && isRssDue) {
             try {
                 const feed = new Feed({
                     title: `AQI 預警 - ${city}`,
@@ -63,23 +73,27 @@ async function updateAqiTask() {
 
                 feed.addItem({
                     title: `⚠️ [${level.label}] AQI 數值達 ${aqi} (${city})`,
-                    description: `監測站位置: ${city}
-當前 AQI: ${aqi}
-健康等級: ${level.label}
-主要數據: PM2.5: ${pm25}, PM10: ${pm10}
-更新時間: ${time}
-請盡量減少戶外活動並佩戴口罩。`,
+                    description: `監測站位置: ${city}\n當前 AQI: ${aqi}\n健康等級: ${level.label}\n主要數據: PM2.5: ${pm25}, PM10: ${pm10}\n更新時間: ${time}\n請盡量減少戶外活動並佩戴口罩。`,
                     link: cityUrl,
                     date: new Date(),
                 });
                 currentRssXml = feed.rss2();
+                lastRssUpdateTime = now;
+                console.log('--- RSS 已更新 ---');
             } catch (rssError) {
                 console.error('RSS 更新失敗:', rssError.message);
             }
         }
 
-        // 2. 邏輯判斷：高於橙色/紅色 (AQI > 150) 時，電報報警
-        if (aqi > 150) {
+        // 2. 邏輯判斷：Telegram 智慧報警
+        // 條件：(24 小時內未發過該等級警報) 且 (24 小時內未發過更高等級的警報)
+        const hasRecentHigherOrSameAlert = Object.keys(levelAlertTimestamps).some(lv => {
+            const levelVal = parseInt(lv);
+            const timestamp = levelAlertTimestamps[lv];
+            return levelVal >= level.value && (now - timestamp) < 24 * 60 * 60 * 1000;
+        });
+
+        if (aqi > CONFIG.ALERT_THRESHOLD && !hasRecentHigherOrSameAlert) {
             const message = `🚨🚨🚨 【緊急空氣預警】\n\n` +
                           `📍 監測地點：${city}\n` +
                           `🤒 空氣質量：${level.label} (${level.color}色)\n` +
@@ -90,7 +104,12 @@ async function updateAqiTask() {
                           `👉 [點此查看詳細數據與地圖](${cityUrl})`;
 
             if (CONFIG.TG_TOKEN && CONFIG.TG_TOKEN !== 'xxx') {
-                bot.telegram.sendMessage(CONFIG.TG_CHAT_ID, message, { parse_mode: 'Markdown' }).catch(tgError => {
+                bot.telegram.sendMessage(CONFIG.TG_CHAT_ID, message, { parse_mode: 'Markdown' })
+                .then(() => {
+                    levelAlertTimestamps[level.value] = now;
+                    console.log(`--- Telegram 報警已發送 (等級: ${level.label}) ---`);
+                })
+                .catch(tgError => {
                     console.error('Telegram 發送失敗 (已跳過):', tgError.message);
                 });
             } else {
