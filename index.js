@@ -1,3 +1,4 @@
+require('dotenv').config();
 const axios = require('axios');
 const express = require('express');
 const { Feed } = require('feed');
@@ -44,26 +45,35 @@ async function updateAqiTask() {
 
         // 1. 邏輯判斷：高於橘色 (AQI > 100) 時，更新 RSS
         if (aqi > 100) {
-            const feed = new Feed({
-                title: "AQI 預警",
-                description: "高於橘色級別的空氣監測",
-                id: "http://localhost/",
-                link: "http://localhost/",
-                updated: new Date(),
-            });
+            try {
+                const feed = new Feed({
+                    title: "AQI 預警",
+                    description: "高於橘色級別的空氣監測",
+                    id: "http://localhost/",
+                    link: "http://localhost/",
+                    updated: new Date(),
+                });
 
-            feed.addItem({
-                title: `⚠️ AQI 警告: ${aqi} - ${level.label}`,
-                description: `更新時間: ${time}，請注意健康防護。`,
-                date: new Date(),
-            });
-            currentRssXml = feed.rss2();
+                feed.addItem({
+                    title: `⚠️ AQI 警告: ${aqi} - ${level.label}`,
+                    description: `更新時間: ${time}，請注意健康防護。`,
+                    date: new Date(),
+                });
+                currentRssXml = feed.rss2();
+            } catch (rssError) {
+                console.error('RSS 更新失敗:', rssError.message);
+            }
         }
 
         // 2. 邏輯判斷：高於橙色/紅色 (AQI > 150) 時，電報報警
         if (aqi > 150) {
-            const message = `🚨🚨🚨 緊急報警！\n當前空氣質量已達【${level.label}】\nAQI 數值：${aqi}\n更新時間：${time}`;
-            bot.telegram.sendMessage(CONFIG.TG_CHAT_ID, message);
+            if (CONFIG.TG_TOKEN && CONFIG.TG_TOKEN !== 'xxx') {
+                bot.telegram.sendMessage(CONFIG.TG_CHAT_ID, message).catch(tgError => {
+                    console.error('Telegram 發送失敗 (已跳過):', tgError.message);
+                });
+            } else {
+                console.log('Telegram Token 未配置或為預設值，跳過通知');
+            }
         }
 
     } catch (error) {
