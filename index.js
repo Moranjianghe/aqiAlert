@@ -72,7 +72,8 @@ async function updateAqiTask() {
             wg: '陣風'
         };
 
-        let detailsArr = [];
+        // 提取所有可用的 iaqi 數據並轉換為友善名稱 (HTML 格式)
+        let detailsHtml = '<ul>';
         if (data.iaqi) {
             Object.keys(data.iaqi).forEach(key => {
                 const label = pollutantMap[key] || key.toUpperCase();
@@ -82,28 +83,27 @@ async function updateAqiTask() {
                 if (key === 'h') unit = '%';
                 if (key === 'p') unit = ' hPa';
                 if (key === 'w' || key === 'wg') unit = ' m/s';
-                detailsArr.push(`${label}: ${value}${unit}`);
+                detailsHtml += `<li><strong>${label}</strong>: ${value}${unit}</li>`;
             });
         }
-        const detailsStr = detailsArr.length > 0 ? detailsArr.join('\n') : '暫無詳細數據';
+        detailsHtml += '</ul>';
 
-        // 提取預報信息 (Forecast)
-        let forecastArr = [];
+        // 提取預報信息 (Forecast - HTML 格式)
+        let forecastHtml = '<ul>';
         if (data.forecast && data.forecast.daily && data.forecast.daily.pm25) {
-            // 過濾出今天及之後的數據，並取前 3 天
             const todayStr = new Date().toISOString().split('T')[0];
-            forecastArr = data.forecast.daily.pm25
+            data.forecast.daily.pm25
                 .filter(f => f.day >= todayStr)
                 .slice(0, 3)
-                .map(f => {
+                .forEach(f => {
                     const fLevel = getAqiLevel(f.avg);
-                    return `📅 ${f.day}: AQI ${f.avg} [${fLevel.label}] (範圍: ${f.min}-${f.max})`;
+                    forecastHtml += `<li>📅 <strong>${f.day}</strong>: AQI ${f.avg} <span style="color:gray;">[${fLevel.label}]</span> (範圍: ${f.min}-${f.max})</li>`;
                 });
         }
-        const forecastStr = forecastArr.length > 0 ? forecastArr.join('\n') : '暫無預報數據';
+        forecastHtml += '</ul>';
 
-        // 提取貢獻單位 (Attributions)
-        const attributions = data.attributions ? data.attributions.map(a => `[${a.name}](${a.url})`).join(', ') : '未知';
+        // 提取貢獻單位 (Attributions - HTML 格式)
+        const attributionsHtml = data.attributions ? data.attributions.map(a => `<a href="${a.url}">${a.name}</a>`).join(', ') : '未知';
 
         console.log(`[${new Date().toLocaleString()}] 當前位置: ${city}, AQI: ${aqi} (${level.label})`);
 
@@ -121,14 +121,21 @@ async function updateAqiTask() {
 
                 feed.addItem({
                     title: `⚠️ [${level.label}] AQI 數值達 ${aqi} (${city})`,
-                    description: `📍 監測站: ${city}\n` +
-                                `📊 當前 AQI: ${aqi} (${level.label})\n` +
-                                `🧪 主要污染物: ${pollutantMap[dominentpol] || dominentpol}\n\n` +
-                                `📝 詳細數據:\n${detailsStr}\n\n` +
-                                `🔮 未來三天預報:\n${forecastStr}\n\n` +
-                                `🕒 更新時間: ${time}\n` +
-                                `🔗 數據來源: ${attributions}\n\n` +
-                                `💡 建議: 請盡量減少戶外活動並佩戴口罩。`,
+                    description: `
+                        <p>📍 <strong>監測站</strong>: ${city}</p>
+                        <p>📊 <strong>當前 AQI</strong>: <span style="font-size:1.2em; color:#d9534f;">${aqi}</span> (${level.label})</p>
+                        <p>🧪 <strong>主要污染物</strong>: ${pollutantMap[dominentpol] || dominentpol}</p>
+                        <hr/>
+                        <h4>📝 詳細監測數據</h4>
+                        ${detailsHtml}
+                        <hr/>
+                        <h4>🔮 未來三天預報</h4>
+                        ${forecastHtml}
+                        <hr/>
+                        <p>🕒 <strong>更新時間</strong>: ${time}</p>
+                        <p>📢 <strong>數據來源</strong>: ${attributionsHtml}</p>
+                        <p>✅ <em>建議: 請盡量減少戶外活動並佩戴口罩。</em></p>
+                    `,
                     link: cityUrl,
                     date: new Date(),
                 });
@@ -147,6 +154,13 @@ async function updateAqiTask() {
             const timestamp = levelAlertTimestamps[lv];
             return levelVal >= level.value && (now - timestamp) < 24 * 60 * 60 * 1000;
         });
+
+        // 為了 Telegram 報警，我們仍需要一個純文字版的 detailsStr
+        const detailsStr = data.iaqi ? Object.keys(data.iaqi).map(key => {
+            const label = pollutantMap[key] || key.toUpperCase();
+            const value = data.iaqi[key].v;
+            return `${label}: ${value}`;
+        }).join('\n') : '暫無詳細數據';
 
         if (aqi > CONFIG.ALERT_THRESHOLD && !hasRecentHigherOrSameAlert) {
             const message = `🚨 *空氣品質警報：${level.label}*\n\n` +
