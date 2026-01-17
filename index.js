@@ -132,7 +132,7 @@ app.get('/aqi.xml', (req, res) => {
 });
 
 // 啟動服務
-app.listen(CONFIG.PORT, '127.0.0.1', () => {
-    console.log(`服務已啟動: http://127.0.0.1:${CONFIG.PORT}/aqi.xml`);
+app.listen(CONFIG.PORT, '0.0.0.0', () => {
+    console.log(`服務已啟動，監聽埠號: ${CONFIG.PORT}`);
     updateAqiTask(); // 啟動時先執行一次
 });
