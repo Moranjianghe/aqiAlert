@@ -20,6 +20,8 @@ const app = express();
 const bot = new Telegraf(CONFIG.TG_TOKEN);
 
 // 全局變量，存放狀態以實現「智慧提醒」
+let rssItems = []; // 存放 RSS 歷史項目
+const MAX_RSS_ITEMS = 20; // 最多保留 20 條記錄
 let currentRssXml = '';
 let lastRssUpdateTime = 0; // 記錄上一次 RSS 更新的時間戳
 // 紀錄每個等級 (2-5) 上一次發送 Telegram 報警的時間戳
@@ -109,39 +111,57 @@ async function updateAqiTask() {
 
         // 1. 邏輯判斷：高於橘色 (AQI > 100) 時，每 60 分鐘更新一次 RSS
         const isRssDue = (now - lastRssUpdateTime) >= 60 * 60 * 1000; // 60 分鐘
+        const itemId = `${cityUrl}#${time}`; // 使用地點與時間戳作為唯一 ID
+
         if (aqi > 100 && isRssDue) {
             try {
-                const feed = new Feed({
-                    title: `AQI 預警 - ${city}`,
-                    description: `來自 ${city} 的即時空氣量監測`,
-                    id: cityUrl,
-                    link: cityUrl,
-                    updated: new Date(),
-                });
+                // 檢查是否已經存在相同時間點的項目
+                const isDuplicate = rssItems.some(item => item.id === itemId);
+                
+                if (!isDuplicate) {
+                    const newItem = {
+                        title: `⚠️ [${level.label}] AQI 數值達 ${aqi} (${city})`,
+                        id: itemId,
+                        link: cityUrl,
+                        date: new Date(),
+                        description: `
+                            <p>📍 <strong>監測站</strong>: ${city}</p>
+                            <p>📊 <strong>當前 AQI</strong>: <span style="font-size:1.2em; color:#d9534f;">${aqi}</span> (${level.label})</p>
+                            <p>🧪 <strong>主要污染物</strong>: ${pollutantMap[dominentpol] || dominentpol}</p>
+                            <hr/>
+                            <h4>📝 詳細監測數據</h4>
+                            ${detailsHtml}
+                            <hr/>
+                            <h4>🔮 未來三天預報</h4>
+                            ${forecastHtml}
+                            <hr/>
+                            <p>🕒 <strong>監測時間</strong>: ${time}</p>
+                            <p>📢 <strong>數據來源</strong>: ${attributionsHtml}</p>
+                            <p>✅ <em>建議: 請盡量減少戶外活動並佩戴口罩。</em></p>
+                        `
+                    };
 
-                feed.addItem({
-                    title: `⚠️ [${level.label}] AQI 數值達 ${aqi} (${city})`,
-                    description: `
-                        <p>📍 <strong>監測站</strong>: ${city}</p>
-                        <p>📊 <strong>當前 AQI</strong>: <span style="font-size:1.2em; color:#d9534f;">${aqi}</span> (${level.label})</p>
-                        <p>🧪 <strong>主要污染物</strong>: ${pollutantMap[dominentpol] || dominentpol}</p>
-                        <hr/>
-                        <h4>📝 詳細監測數據</h4>
-                        ${detailsHtml}
-                        <hr/>
-                        <h4>🔮 未來三天預報</h4>
-                        ${forecastHtml}
-                        <hr/>
-                        <p>🕒 <strong>更新時間</strong>: ${time}</p>
-                        <p>📢 <strong>數據來源</strong>: ${attributionsHtml}</p>
-                        <p>✅ <em>建議: 請盡量減少戶外活動並佩戴口罩。</em></p>
-                    `,
-                    link: cityUrl,
-                    date: new Date(),
-                });
-                currentRssXml = feed.rss2();
-                lastRssUpdateTime = now;
-                console.log('--- RSS 已更新 ---');
+                    // 將新項目加入陣列最前面，並限制數量
+                    rssItems.unshift(newItem);
+                    if (rssItems.length > MAX_RSS_ITEMS) {
+                        rssItems = rssItems.slice(0, MAX_RSS_ITEMS);
+                    }
+
+                    // 重新生成 RSS XML
+                    const feed = new Feed({
+                        title: `AQI 預警 - ${city}`,
+                        description: `來自 ${city} 的即時空氣量監測`,
+                        id: cityUrl,
+                        link: cityUrl,
+                        updated: new Date(),
+                    });
+
+                    rssItems.forEach(item => feed.addItem(item));
+                    
+                    currentRssXml = feed.rss2();
+                    lastRssUpdateTime = now;
+                    console.log(`--- RSS 已更新 (當前共 ${rssItems.length} 條) ---`);
+                }
             } catch (rssError) {
                 console.error('RSS 更新失敗:', rssError.message);
             }
