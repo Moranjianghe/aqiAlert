@@ -13,7 +13,7 @@ const CONFIG = {
     TG_CHAT_ID: process.env.TG_CHAT_ID,
     PORT: process.env.PORT,
     CHECK_INTERVAL: '*/30 * * * *', // 每 30 分鐘執行
-    ALERT_THRESHOLD: 150            // 電報報警門檻 (中度污染以上)
+    ALERT_THRESHOLD: 150            // 電報報警門檻 (不健康以上)
 };
 
 const app = express();
@@ -22,20 +22,22 @@ const bot = new Telegraf(CONFIG.TG_TOKEN);
 // 全局變量，存放狀態以實現「智慧提醒」
 let currentRssXml = '';
 let lastRssUpdateTime = 0; // 記錄上一次 RSS 更新的時間戳
-// 紀錄每個等級 (1-4) 上一次發送 Telegram 報警的時間戳
+// 紀錄每個等級 (2-5) 上一次發送 Telegram 報警的時間戳
 let levelAlertTimestamps = {
-    2: 0, // 輕度
-    3: 0, // 中度
-    4: 0  // 重度
+    2: 0, // 對敏感族群不健康
+    3: 0, // 不健康
+    4: 0, // 非常不健康
+    5: 0  // 危害
 };
 
-// AQI 等級對應表 (增加 value 用於邏輯判斷)
+// AQI 等級對應表 (依據 US EPA AQI 標準)
 const getAqiLevel = (aqi) => {
-    if (aqi <= 50) return { value: 0, label: '優', color: '綠' };
-    if (aqi <= 100) return { value: 1, label: '良', color: '黃' };
-    if (aqi <= 150) return { value: 2, label: '輕度污染', color: '橘' };
-    if (aqi <= 200) return { value: 3, label: '中度污染', color: '紅/橙' };
-    return { value: 4, label: '重度污染', color: '紫' };
+    if (aqi <= 50) return { value: 0, label: '良好', color: '綠' };
+    if (aqi <= 100) return { value: 1, label: '普通', color: '黃' };
+    if (aqi <= 150) return { value: 2, label: '對敏感族群不健康', color: '橘' };
+    if (aqi <= 200) return { value: 3, label: '不健康', color: '紅' };
+    if (aqi <= 300) return { value: 4, label: '非常不健康', color: '紫' };
+    return { value: 5, label: '危害', color: '褐紅' };
 };
 
 // 核心任務：獲取數據並處理邏輯
@@ -50,12 +52,58 @@ async function updateAqiTask() {
         const time = data.time.s;
         const city = data.city.name;
         const cityUrl = data.city.url;
+        const dominentpol = data.dominentpol;
         const level = getAqiLevel(aqi);
         const now = Date.now();
         
-        // 提取主要污染物細節 (如果存在)
-        const pm25 = data.iaqi.pm25 ? data.iaqi.pm25.v : 'N/A';
-        const pm10 = data.iaqi.pm10 ? data.iaqi.pm10.v : 'N/A';
+        // 提取所有可用的 iaqi 數據並轉換為友善名稱
+        const pollutantMap = {
+            pm25: 'PM2.5',
+            pm10: 'PM10',
+            o3: '臭氧 (O3)',
+            no2: '二氧化氮 (NO2)',
+            so2: '二氧化硫 (SO2)',
+            co: '一氧化碳 (CO)',
+            t: '溫度',
+            p: '氣壓',
+            h: '濕度',
+            dew: '露點',
+            w: '風速',
+            wg: '陣風'
+        };
+
+        let detailsArr = [];
+        if (data.iaqi) {
+            Object.keys(data.iaqi).forEach(key => {
+                const label = pollutantMap[key] || key.toUpperCase();
+                const value = data.iaqi[key].v;
+                let unit = '';
+                if (key === 't' || key === 'dew') unit = '°C';
+                if (key === 'h') unit = '%';
+                if (key === 'p') unit = ' hPa';
+                if (key === 'w' || key === 'wg') unit = ' m/s';
+                detailsArr.push(`${label}: ${value}${unit}`);
+            });
+        }
+        const detailsStr = detailsArr.length > 0 ? detailsArr.join('\n') : '暫無詳細數據';
+
+        // 提取預報信息 (Forecast)
+        let forecastArr = [];
+        if (data.forecast && data.forecast.daily && data.forecast.daily.pm25) {
+            // 過濾出今天及之後的數據，並取前 3 天
+            const todayStr = new Date().toISOString().split('T')[0];
+            forecastArr = data.forecast.daily.pm25
+                .filter(f => f.day >= todayStr)
+                .slice(0, 3)
+                .map(f => {
+                    const fLevel = getAqiLevel(f.avg);
+                    return `📅 ${f.day}: AQI ${f.avg} [${fLevel.label}] (範圍: ${f.min}-${f.max})`;
+                });
+        }
+        const forecastStr = forecastArr.length > 0 ? forecastArr.join('\n') : '暫無預報數據';
+
+        // 提取貢獻單位 (Attributions)
+        const attributions = data.attributions ? data.attributions.map(a => `[${a.name}](${a.url})`).join(', ') : '未知';
 
         console.log(`[${new Date().toLocaleString()}] 當前位置: ${city}, AQI: ${aqi} (${level.label})`);
 
@@ -73,7 +121,14 @@ async function updateAqiTask() {
 
                 feed.addItem({
                     title: `⚠️ [${level.label}] AQI 數值達 ${aqi} (${city})`,
-                    description: `監測站位置: ${city}\n當前 AQI: ${aqi}\n健康等級: ${level.label}\n主要數據: PM2.5: ${pm25}, PM10: ${pm10}\n更新時間: ${time}\n請盡量減少戶外活動並佩戴口罩。`,
+                    description: `📍 監測站: ${city}\n` +
+                                `📊 當前 AQI: ${aqi} (${level.label})\n` +
+                                `🧪 主要污染物: ${pollutantMap[dominentpol] || dominentpol}\n\n` +
+                                `📝 詳細數據:\n${detailsStr}\n\n` +
+                                `🔮 未來三天預報:\n${forecastStr}\n\n` +
+                                `🕒 更新時間: ${time}\n` +
+                                `🔗 數據來源: ${attributions}\n\n` +
+                                `💡 建議: 請盡量減少戶外活動並佩戴口罩。`,
                     link: cityUrl,
                     date: new Date(),
                 });
@@ -94,14 +149,12 @@ async function updateAqiTask() {
         });
 
         if (aqi > CONFIG.ALERT_THRESHOLD && !hasRecentHigherOrSameAlert) {
-            const message = `🚨🚨🚨 【緊急空氣預警】\n\n` +
-                          `📍 監測地點：${city}\n` +
-                          `🤒 空氣質量：${level.label} (${level.color}色)\n` +
-                          `📈 AQI 數值：${aqi}\n` +
-                          `🌫️ PM2.5 濃度：${pm25}\n` +
-                          `🌫️ PM10 濃度：${pm10}\n` +
-                          `⏰ 更新時間：${time}\n\n` +
-                          `👉 [點此查看詳細數據與地圖](${cityUrl})`;
+            const message = `🚨 *空氣品質警報：${level.label}*\n\n` +
+                          `📍 地點：${city}\n` +
+                          `📈 AQI 數值：*${aqi}* (${level.color}色)\n` +
+                          `🧪 主污染物：${pollutantMap[dominentpol] || dominentpol}\n\n` +
+                          `💡 建議：請盡量減少戶外活動並佩戴口罩。\n\n` +
+                          `👉 [查看完整數據、詳細分析與預報](${cityUrl})`;
 
             if (CONFIG.TG_TOKEN && CONFIG.TG_TOKEN !== 'xxx') {
                 bot.telegram.sendMessage(CONFIG.TG_CHAT_ID, message, { parse_mode: 'Markdown' })
